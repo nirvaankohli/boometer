@@ -4,3 +4,11 @@ import pathlib
 import json
 import sys
 import argparse
+
+class ytdl:
+
+    def __init__(
+            
+        
+
+    ):
