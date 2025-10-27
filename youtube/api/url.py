@@ -50,9 +50,33 @@ class ytdl:
         }
 
         return self.opts
-    
-    def get_info
 
-    def get_opts(self):
+    def get_info(self, url: str) -> Dict[str, Any]:
+
+        opts = self.get_opts()
+
+        with YoutubeDL(opts) as ydl:
+
+            info = ydl.extract_info(url, download=True)
+
+        return info
+
+    def list_formats(self, url: str) -> List[Dict[str, Any]]:
+
+        info = self.get_info(url)
+        return info.get("formats", [])
+    
+    def download(
+            
+        self,
+        url: str,
+        subtitles: Optional[bool] = False,
+        subtitleslangs: Optional[List[str]] = None,
+    
+    ) -> Dict[str, Any]:
+        
+        
+
+    def get_opts(self) -> Dict[str, Any]:
 
         return self.opts
