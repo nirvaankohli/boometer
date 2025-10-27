@@ -4,6 +4,7 @@ import pathlib
 import json
 import sys
 import argparse
+import shutil
 
 
 class ytdl:
@@ -12,7 +13,7 @@ class ytdl:
         self,
         out_dir: Optional[pathlib.Path] = None,
         format: Optional[str] = "bv*+ba/b",
-        merge_output_format: Optional[str] = "mp4",
+        merge_output_format: Optional[str] = None,
         quiet: Optional[bool] = True,
     ):
 
@@ -41,13 +42,27 @@ class ytdl:
                 / "%(uploader)s - %(title)s.%(ext)s"
             ),
             "format": kwargs.get("format", "bv*+ba/b"),
-            "merge_output_format": kwargs.get("merge_output_format", "mp4"),
             "restrictfilenames": True,
-            "merge_output_format": kwargs.get("merge_output_format", "mp4"),
             "quiet": kwargs.get("quiet", True),
             "noprogress": kwargs.get("quiet", True),
             "nocheckcertificate": True,
         }
+
+        if kwargs.get("merge_output_format") is not None:
+            self.opts["merge_output_format"] = kwargs.get("merge_output_format", "mp4")
+            print("Set merge_output_format to", self.opts["merge_output_format"])
+        
+        
+        if shutil.which("ffmpeg") is None:
+            fmt = self.opts.get("format", "")
+            if "+" in fmt or "merge_output_format" in self.opts:
+                print(
+                    "Warning: ffmpeg not found in PATH. Falling back to single-file format 'best' to avoid merging.",
+                    file=sys.stderr,
+                )
+
+                self.opts.pop("merge_output_format", None)
+                self.opts["format"] = "best"
 
         return self.opts
 
@@ -65,16 +80,14 @@ class ytdl:
 
         info = self.get_info(url)
         return info.get("formats", [])
-    
+
     def download(
-            
         self,
         url: str,
         subtitles: Optional[bool] = False,
         subtitleslangs: Optional[List[str]] = None,
-    
     ) -> Dict[str, Any]:
-        
+
         opts = self.get_opts()
 
         if subtitles:
@@ -95,3 +108,12 @@ class ytdl:
     def get_opts(self) -> Dict[str, Any]:
 
         return self.opts
+
+
+if __name__ == "__main__":
+
+    url = "https://www.youtube.com/watch?v=NMFPrCjpVCI"
+    ytdl_instance = ytdl()
+    info = ytdl_instance.get_info(url)
+    print(info["title"], info["duration"], len(info["thumbnails"]))
+    ytdl_instance.download(url)
