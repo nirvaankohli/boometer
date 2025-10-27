@@ -75,7 +75,22 @@ class ytdl:
     
     ) -> Dict[str, Any]:
         
-        
+        opts = self.get_opts()
+
+        if subtitles:
+
+            self.opts.update(
+                {
+                    "writesubtitles": True,
+                    "writeautomaticsub": True,
+                    "subtitleslangs": subtitleslangs or ["en"],
+                }
+            )
+
+        with YoutubeDL(opts) as ydl:
+
+            info = ydl.extract_info(url, download=True)
+        return info
 
     def get_opts(self) -> Dict[str, Any]:
 
