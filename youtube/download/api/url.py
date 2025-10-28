@@ -114,6 +114,8 @@ if __name__ == "__main__":
 
     url = "https://www.youtube.com/watch?v=NMFPrCjpVCI"
     ytdl_instance = ytdl()
+
     info = ytdl_instance.get_info(url)
     print(info["title"], info["duration"], len(info["thumbnails"]))
+
     ytdl_instance.download(url)
