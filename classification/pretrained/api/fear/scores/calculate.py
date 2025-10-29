@@ -1,3 +1,7 @@
+from typing import List
+import itertools
+
+
 class from_emotion_scores:
 
     def __init__(self, emotion_scores: dict = None):
@@ -20,13 +24,13 @@ class from_emotion_scores:
     def get_default_weights(self) -> dict:
 
         default_weights = {
-            "anger": 0.8,
-            "disgust": 3.25,
-            "fear": 5,
-            "happy": 0.25,
-            "neutral": 1.0,
-            "sad": 2.5,
-            "surprise": 4.0,
+            "anger": 2.5,
+            "disgust": 5.0,
+            "fear": 10.0,
+            "happy": 2.0,
+            "neutral": 2.5,
+            "sad": 3.0,
+            "surprise": 8.0,
         }
 
         return default_weights
@@ -51,10 +55,15 @@ class from_emotion_scores:
 
         fear_score = 0.0
 
-        for emotion, score in self.emotion_scores.items()[:5]:
+        top_items = list(
+            itertools.islice(
+                sorted(self.emotion_scores.items(), key=lambda x: x[1], reverse=True), 5
+            )
+        )
+        emotion_scores = dict(top_items)
+        for emotion, score in emotion_scores.items():
 
             weight = self.emotion_weights.get(emotion, 1.0)
-
-            fear_score += score * weight
+            fear_score += (score / 10) * weight
 
         return fear_score
