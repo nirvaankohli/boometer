@@ -16,10 +16,13 @@ def get_youtube_id(url: str) -> Optional[str]:
         return parse_qs(p.query).get("v", [None])[0]
     return None
 
+def extract_needed_data(results: List[Dict], ) -> list:
+
+
 
 def youtube_results(query: str, limit: int) -> List[Dict]:
-    return VideosSearch(query, limit=limit).result().get("result", [])
 
+    return VideosSearch(query, limit=limit).result().get("result", [])
 
 st.set_page_config(page_title="YouTube Search & Watch", page_icon="▶", layout="wide")
 
