@@ -51,8 +51,7 @@ class ytdl:
         if kwargs.get("merge_output_format") is not None:
             self.opts["merge_output_format"] = kwargs.get("merge_output_format", "mp4")
             print("Set merge_output_format to", self.opts["merge_output_format"])
-        
-        
+
         if shutil.which("ffmpeg") is None:
             fmt = self.opts.get("format", "")
             if "+" in fmt or "merge_output_format" in self.opts:
