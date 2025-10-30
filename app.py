@@ -14,7 +14,7 @@ from classification.pretrained.api.inference.emotion.classification import Infer
 from classification.pretrained.api.fear.scores.calculate import from_emotion_scores
 
 model = Infer()
-
+debug = True
 
 def get_youtube_id(url: str) -> Optional[str]:
 
@@ -134,27 +134,33 @@ if "v" in qp and qp["v"]:
         class VideoProcessor(VideoTransformerBase):
             def transform(self, frame):
 
-                print("hi")
-
                 img = frame.to_ndarray(format="bgr24")
+                img_proc = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
                 print("Image received for processing.")
 
-                model.set_image(img)
+                model.set_image(img_proc)
                 print("Image set in model.")
                 results = model.predict()
                 print("Model prediction results:", results)
                 scores = model.get_numeric_scores(results)
                 print("Numeric scores:", scores)
                 fear_calculator = from_emotion_scores(emotion_scores=scores)
+
                 print("Calculating fear score...")
+
                 fear_score = fear_calculator.calculate_fear_score()
+                
                 print(f"Calculated Fear Score: {fear_score:.4f}")
 
                 img = cv2.putText(
                     img,
+
                     f"Fear Score: {fear_score:.2f}",
+                    
                     (10, 30),
+                    
                     cv2.FONT_HERSHEY_SIMPLEX,
+
                 )
                 st.write("Fear score overlay added to image.")
 
