@@ -4,7 +4,7 @@ import torch
 
 class Infer:
 
-    def __init__(self, model="dima806/facial_emotions_image_detection"):
+    def __init__(self, model="Dc-4nderson/vit-emotion-classifier"):
         self.model = model
         self.model_type = "image-classification"
 
@@ -42,7 +42,14 @@ class Infer:
 
     def predict(self):
 
-        results = self.pipe(self.image)
+        print("Running prediction...")
+        try:
+            results = self.pipe(self.image)
+        except Exception as e:
+            print(f"Error during prediction: {str(e)}")
+            return []
+
+        print("Prediction completed.")
 
         return results
 
