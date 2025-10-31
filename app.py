@@ -12,9 +12,44 @@ import av
 from PIL import Image
 from classification.pretrained.api.inference.emotion.classification import Infer
 from classification.pretrained.api.fear.scores.calculate import from_emotion_scores
+from classification.preprocessing.image.cropping.face.transform import crop_face
+from pathlib import Path
 
-model = Infer()
+
+MODEL_PATH = (
+    Path(__file__).parent
+    / "classification"
+    / "preprocessing"
+    / "model"
+    / "haarcascade_frontalface_default.xml"
+)
+
+
+def print_debug(*args):
+
+    if debug:
+
+        print_msg = ""
+
+        for message in args:
+
+            if type(message) == str:
+
+                print_msg += message + " "
+
+            else:
+
+                print_msg += str(message) + " "
+
+        print(f"[DEBUG] {print_msg.strip()}")
+
+
 debug = True
+
+print_debug("Initializing model...")
+model = Infer()
+print_debug("Model initialized.")
+
 
 def get_youtube_id(url: str) -> Optional[str]:
 
@@ -132,37 +167,96 @@ if "v" in qp and qp["v"]:
     with col2:
 
         class VideoProcessor(VideoTransformerBase):
+            def __init__(self):
+                self.face_detector = crop_face(MODEL_PATH, debug=debug)
+                self.last_score = 0.0
+                self.frame_count = 0
+                self.process_this_frame = True
+
             def transform(self, frame):
-
+                self.frame_count += 1
                 img = frame.to_ndarray(format="bgr24")
-                img_proc = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
-                print("Image received for processing.")
 
-                model.set_image(img_proc)
-                print("Image set in model.")
-                results = model.predict()
-                print("Model prediction results:", results)
-                scores = model.get_numeric_scores(results)
-                print("Numeric scores:", scores)
-                fear_calculator = from_emotion_scores(emotion_scores=scores)
+                # Process every 3rd frame for performance
+                if self.frame_count % 3 == 0:
+                    try:
+                        # Detect faces first
+                        faces = self.face_detector.detect_faces(img)
 
-                print("Calculating fear score...")
+                        if len(faces) > 0:
+                            # Draw face rectangle
+                            for x, y, w, h in faces:
+                                cv2.rectangle(
+                                    img, (x, y), (x + w, y + h), (0, 255, 0), 2
+                                )
 
-                fear_score = fear_calculator.calculate_fear_score()
-                
-                print(f"Calculated Fear Score: {fear_score:.4f}")
+                            # Get the cropped face
+                            img_proc = self.face_detector.crop_first_face(img)
 
-                img = cv2.putText(
+                            if img_proc is not None and img_proc.size > 0:
+                                # Ensure proper size and channels
+                                if (
+                                    len(img_proc.shape) == 3
+                                ):  # Check if it's a valid color image
+                                    # Convert to RGB for the model
+                                    img_proc_rgb = cv2.cvtColor(
+                                        img_proc, cv2.COLOR_BGR2RGB
+                                    )
+                                    img_proc_pil = Image.fromarray(img_proc_rgb)
+
+                                    # Get emotion predictions
+                                    model.set_image(img_proc_pil)
+                                    results = model.predict()
+                                    print_debug("Raw prediction results:", results)
+
+                                    if (
+                                        results
+                                        and isinstance(results, list)
+                                        and len(results) > 0
+                                    ):
+                                        scores = model.get_numeric_scores(results)
+                                        print_debug("Numeric scores:", scores)
+
+                                        # Validate scores before calculating fear
+                                        if (
+                                            scores
+                                            and len(scores) > 0
+                                            and all(
+                                                isinstance(v, (int, float))
+                                                for v in scores.values()
+                                            )
+                                        ):
+                                            fear_calculator = from_emotion_scores(
+                                                emotion_scores=scores, debug=True
+                                            )
+                                            new_score = (
+                                                fear_calculator.calculate_fear_score()
+                                            )
+
+                                            if new_score is not None and not np.isnan(
+                                                new_score
+                                            ):
+                                                self.last_score = new_score
+                                                print_debug(
+                                                    f"Updated fear score to: {self.last_score}"
+                                                )
+
+                    except Exception as e:
+                        print_debug(f"Frame processing error: {str(e)}")
+                        import traceback
+
+                        print_debug("Traceback:", traceback.format_exc())
+
+                # Always draw the score
+                cv2.putText(
                     img,
-
-                    f"Fear Score: {fear_score:.2f}",
-                    
+                    f"Fear Score: {self.last_score:.2f}",
                     (10, 30),
-                    
                     cv2.FONT_HERSHEY_SIMPLEX,
-
+                    1,
+                    (0, 0, 255),
+                    2,
                 )
-                st.write("Fear score overlay added to image.")
 
                 return img
 

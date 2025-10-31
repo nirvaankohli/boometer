@@ -1,10 +1,13 @@
 from transformers import pipeline, AutoModelForImageClassification, AutoImageProcessor
 import torch
+import numpy as np
 
 
 class Infer:
 
-    def __init__(self, model="Dc-4nderson/vit-emotion-classifier"):
+    def __init__(self, model="dima806/facial_emotions_image_detection", debug: bool = True):
+
+        self.debug = debug
         self.model = model
         self.model_type = "image-classification"
 
@@ -24,12 +27,24 @@ class Infer:
             )
 
         except Exception as e:
-            print(f"Error initializing model: {str(e)}")
+            self.print_debug(f"Error initializing model: {str(e)}")
             raise  # Re-raise the exception for proper error handling
+
+    def print_debug(self, message: str):
+
+        if self.debug:
+
+            print(f"[DEBUG] {message}")
 
     def update_pipeline(self):
 
-        self.pipe = pipeline(self.model_type, model=self.model)
+        try:
+
+            self.pipe = pipeline(self.model_type, model=self.model)
+
+        except Exception as e:
+
+            self.print_debug(f"Error updating pipeline: {str(e)}")
 
     def change_model(self, new_model: str):
 
@@ -41,24 +56,54 @@ class Infer:
         self.image = image
 
     def predict(self):
+        self.print_debug("Running prediction...")
 
-        print("Running prediction...")
         try:
+            if not hasattr(self, "image") or self.image is None:
+                self.print_debug("No image set for prediction")
+                return []
+
+            self.print_debug(
+                f"Image type: {type(self.image)}, size: {self.image.size if hasattr(self.image, 'size') else 'unknown'}"
+            )
             results = self.pipe(self.image)
+            self.print_debug(f"Raw prediction results: {results}")
+
+            if not results:
+                self.print_debug("Empty results from pipeline")
+                return []
+
+            return results
+
         except Exception as e:
-            print(f"Error during prediction: {str(e)}")
+            self.print_debug(f"Error during prediction: {str(e)}")
+            import traceback
+
+            self.print_debug(f"Traceback: {traceback.format_exc()}")
             return []
 
-        print("Prediction completed.")
-
-        return results
-
     def get_numeric_scores(self, results):
+        try:
+            if not results or not isinstance(results, list):
+                self.print_debug(f"Invalid results format: {results}")
+                return {}
 
-        numeric_scores = {}
+            numeric_scores = {}
+            for item in results:
+                if isinstance(item, dict) and "label" in item and "score" in item:
+                    try:
+                        score = float(item["score"]) * 10
+                        if not np.isnan(score) and score >= 0:
+                            numeric_scores[item["label"].lower()] = score
+                    except (ValueError, TypeError) as e:
+                        self.print_debug(f"Error processing score for {item}: {e}")
 
-        for i in results:
+            self.print_debug(f"Processed numeric scores: {numeric_scores}")
+            return numeric_scores
 
-            numeric_scores[i["label"]] = i["score"] * 10
+        except Exception as e:
+            self.print_debug(f"Error getting numeric scores: {str(e)}")
+            import traceback
 
-        return numeric_scores
+            self.print_debug(f"Traceback: {traceback.format_exc()}")
+            return {}
