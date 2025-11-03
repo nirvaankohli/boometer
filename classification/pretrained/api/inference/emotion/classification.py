@@ -70,6 +70,7 @@ class Infer:
 
     def _assert_no_meta(self):
         try:
+
             def is_meta_tensor(t: torch.Tensor) -> bool:
                 try:
                     if getattr(t, "is_meta", False):
@@ -165,6 +166,7 @@ class Infer:
 
     def _materialize_meta_tensors(self) -> None:
         """Replace any remaining meta parameters/buffers with CPU tensors (zeros)."""
+
         def _set_by_name(module, name: str, value, is_param: bool):
             parts = name.split(".")
             sub = module
@@ -189,7 +191,9 @@ class Infer:
                 except Exception:
                     is_meta = getattr(p, "is_meta", False)
                 if is_meta:
-                    cpu_tensor = torch.zeros(tuple(p.shape), dtype=p.dtype, device="cpu")
+                    cpu_tensor = torch.zeros(
+                        tuple(p.shape), dtype=p.dtype, device="cpu"
+                    )
                     _set_by_name(self._model, name, cpu_tensor, is_param=True)
             # Buffers
             for name, b in list(self._model.named_buffers()):
@@ -199,7 +203,9 @@ class Infer:
                 except Exception:
                     is_meta = getattr(b, "is_meta", False)
                 if is_meta:
-                    cpu_tensor = torch.zeros(tuple(b.shape), dtype=b.dtype, device="cpu")
+                    cpu_tensor = torch.zeros(
+                        tuple(b.shape), dtype=b.dtype, device="cpu"
+                    )
                     _set_by_name(self._model, name, cpu_tensor, is_param=False)
 
     def _init_model_and_processor(self) -> None:

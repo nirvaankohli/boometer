@@ -1,12 +1,14 @@
-# streamlit_app.py
 from typing import List, Dict, Optional
 from urllib.parse import parse_qs, urlparse
 import math
 import streamlit as st
+from datetime import datetime
+import pandas as pd
+import plotly.graph_objects as go
 from youtubesearchpython import VideosSearch
 import cv2
 import numpy as np
-from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, RTCConfiguration
+from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration
 import av
 from PIL import Image
 from classification.pretrained.api.inference.emotion.classification import Infer
@@ -16,6 +18,8 @@ from pathlib import Path
 from collections import deque
 import time
 import queue
+import csv
+import os
 
 
 MODEL_PATH = (
@@ -48,27 +52,124 @@ def print_debug(*args):
 
 debug = True
 
-print_debug("Initializing model...")
-model = Infer()
-print_debug("Model initialized.")
+
+def get_csv_path(vid: str) -> str:
+    return "fear.csv"
+
+
+def write_fear_data(vid: str, timestamp: float, fear_score: float, weighted_avg: float):
+    csv_path = get_csv_path(vid)
+    try:
+        file_exists = os.path.exists(csv_path)
+
+        with open(csv_path, "a", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            if not file_exists:
+                writer.writerow(["timestamp", "fear_score", "weighted_avg"])
+
+            writer.writerow([timestamp, fear_score, weighted_avg])
+            f.flush()
+
+        print_debug(
+            f"CSV WRITTEN: {csv_path} - Fear: {fear_score:.2f}, WAvg: {weighted_avg:.2f}"
+        )
+
+    except Exception as e:
+        print_debug("CSV write error:", str(e))
+
+
+def read_latest_fear_data(vid: str) -> tuple:
+    csv_path = get_csv_path(vid)
+    print_debug(f"Reading from CSV: {csv_path}")
+    try:
+        if not os.path.exists(csv_path):
+            print_debug(f"CSV file does not exist: {csv_path}")
+            return None, None, None
+
+        print_debug(f"CSV file exists, reading...")
+        with open(csv_path, "r", encoding="utf-8") as f:
+            reader = csv.reader(f)
+            rows = list(reader)
+            print_debug(f"CSV has {len(rows)} rows")
+
+            if len(rows) < 2:
+                print_debug("No data rows found")
+                return None, None, None
+
+            last_row = rows[-1]
+            print_debug(f"Last row: {last_row}")
+
+            if len(last_row) >= 3:
+                result = float(last_row[0]), float(last_row[1]), float(last_row[2])
+                print_debug(f"Returning: {result}")
+                return result
+
+    except Exception as e:
+        print_debug("CSV read error:", str(e))
+
+    return None, None, None
+
+
+def read_all_fear_data(vid: str) -> list:
+    csv_path = get_csv_path(vid)
+    data = []
+    try:
+        if not os.path.exists(csv_path):
+            return data
+
+        with open(csv_path, "r", encoding="utf-8") as f:
+            reader = csv.reader(f)
+            rows = list(reader)
+            if len(rows) < 2:
+                return data
+
+            for row in rows[1:]:
+                if len(row) >= 3:
+                    timestamp = float(row[0])
+                    dt = datetime.fromtimestamp(timestamp)
+                    weighted_avg = float(row[2])
+                    data.append({"t": dt, "weighted": weighted_avg})
+
+    except Exception as e:
+        print_debug("CSV read all error:", str(e))
+
+    return data
+
+
+@st.cache_resource(show_spinner="Loading emotion model (CPU)...")
+def get_infer_model() -> Infer:
+    print_debug("Initializing model (lazy)...")
+    m = Infer()
+    print_debug("Model initialized (lazy).")
+    return m
 
 
 def stop_webrtc_and_go_back(vid: str, ctx):
 
-    # Attempt to stop the webrtc streamer cleanly before navigation
     try:
         if ctx is not None and hasattr(ctx, "stop"):
             ctx.stop()
-            time.sleep(0.1)  # give it a brief moment to tear down
+            time.sleep(0.1)
     except Exception as e:
         print_debug("Error stopping WebRTC:", str(e))
 
-    # Clear any chart instance for this video
+    try:
+        csv_path = get_csv_path(vid)
+        if os.path.exists(csv_path):
+            os.remove(csv_path)
+            print_debug(f"Cleaned up CSV file: {csv_path}")
+    except Exception as e:
+        print_debug("Error cleaning CSV:", str(e))
+
     chart_key = f"fear_chart_{vid}"
     if chart_key in st.session_state:
         st.session_state[chart_key] = None
+    wavg_key = f"wavg_series_{vid}"
+    if wavg_key in st.session_state:
+        del st.session_state[wavg_key]
+    if f"last_csv_time_{vid}" in st.session_state:
+        del st.session_state[f"last_csv_time_{vid}"]
 
-    # Remove the video query param and rerun
     try:
         del st.query_params["v"]
     except KeyError:
@@ -144,8 +245,13 @@ if "v" in qp and qp["v"]:
     col1, col2 = st.columns([1, 1])
     video_url = f"https://www.youtube.com/watch?v={vid}"
 
-    col1.markdown(
-        f"""
+    plotly_placeholder = st.empty()
+    status_placeholder = st.empty()
+
+    with col1:
+        
+        st.markdown(
+            f"""
         <div class="player">
             <iframe class="player ka-player-iframe centered-when-windowed _1rzb079g"
                 name="ka-player-iframe"
@@ -185,27 +291,36 @@ if "v" in qp and qp["v"]:
             }}
         </style>
         """,
-        unsafe_allow_html=True,
-        width="stretch",
-    )
+            unsafe_allow_html=True,
+            width="stretch",
+        )
 
     with col2:
 
-        # run streamlit cache clear
-        result_queue = queue.Queue(maxsize=1)
+        proc_freq_key = f"proc_every_n_{vid}"
+        st.slider(
+            "Process every Nth frame (lower = more frequent)",
+            min_value=1,
+            max_value=5,
+            value=1,
+            key=proc_freq_key,
+            help="Set to 1 to run classification on every frame. Increase to reduce CPU load.",
+        )
 
-        class VideoProcessor(VideoTransformerBase):
+        class VideoProcessor(VideoProcessorBase):
 
             def __init__(self):
 
-                self.face_detector = crop_face(MODEL_PATH, debug=debug)
+                self.face_detector = crop_face(str(MODEL_PATH), debug=debug)
+                self.model = get_infer_model()
+                self.proc_freq_key = f"proc_every_n_{vid}"
                 self.last_score = 0.0
                 self.weighted_score = 0.0
                 self.frame_count = 0
                 self.process_this_frame = True
                 self.scores = deque(maxlen=180)
                 self.timestamps = deque(maxlen=180)
-                self.result_queue = result_queue
+                self.vid = vid
 
             @staticmethod
             def weighted_average(scores) -> float:
@@ -213,15 +328,20 @@ if "v" in qp and qp["v"]:
                     return 0.0
                 arr = np.asarray(scores, dtype=float)
                 arr = np.clip(arr, 0.0, 10.0)
-                weights = np.maximum(arr, 1e-6)  # higher scores get higher weights
+                weights = np.maximum(arr, 1e-6)
                 return float(np.sum(arr * weights) / np.sum(weights))
 
             def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
                 self.frame_count += 1
                 img = frame.to_ndarray(format="bgr24")
 
-                # Process every 3rd frame for performance
-                if self.frame_count % 3 == 0:
+                try:
+                    proc_every = int(st.session_state.get(self.proc_freq_key, 1))
+                except Exception:
+                    proc_every = 1
+                proc_every = max(1, proc_every)
+
+                if self.frame_count % proc_every == 0:
                     try:
                         faces = self.face_detector.detect_faces(img)
                         if len(faces) > 0:
@@ -239,12 +359,12 @@ if "v" in qp and qp["v"]:
                                 img_proc_rgb = cv2.cvtColor(img_proc, cv2.COLOR_BGR2RGB)
                                 img_proc_pil = Image.fromarray(img_proc_rgb)
 
-                                model.set_image(img_proc_pil)
-                                results = model.predict()
+                                self.model.set_image(img_proc_pil)
+                                results = self.model.predict()
                                 print_debug("Raw prediction results:", results)
 
                                 if results and isinstance(results, list):
-                                    scores = model.get_numeric_scores(results)
+                                    scores = self.model.get_numeric_scores(results)
                                     print_debug("Numeric scores:", scores)
 
                                     if scores and all(
@@ -257,7 +377,7 @@ if "v" in qp and qp["v"]:
                                         if new_score is not None and not np.isnan(
                                             new_score
                                         ):
-                                            # Update raw and weighted scores
+
                                             self.last_score = new_score
                                             now = time.time()
                                             self.timestamps.append(now)
@@ -265,17 +385,18 @@ if "v" in qp and qp["v"]:
                                             self.weighted_score = self.weighted_average(
                                                 list(self.scores)
                                             )
-                                            # Stream to UI
                                             try:
-                                                self.result_queue.put_nowait(
-                                                    (
-                                                        now,
-                                                        self.last_score,
-                                                        self.weighted_score,
-                                                    )
+                                                write_fear_data(
+                                                    self.vid,
+                                                    now,
+                                                    self.last_score,
+                                                    self.weighted_score,
                                                 )
-                                            except queue.Full:
-                                                pass
+                                                print_debug(
+                                                    f"CSV: Written fear data - Fear: {self.last_score:.2f}, WAvg: {self.weighted_score:.2f}"
+                                                )
+                                            except Exception as e:
+                                                print_debug("CSV write error:", str(e))
                                             print_debug(
                                                 f"Updated fear score to: {self.last_score} (weighted: {self.weighted_score:.2f})"
                                             )
@@ -285,7 +406,6 @@ if "v" in qp and qp["v"]:
                         print_debug(f"Frame processing error: {str(e)}")
                         print_debug("Traceback:", traceback.format_exc())
 
-                # Overlay both instantaneous and weighted scores
                 cv2.putText(
                     img,
                     f"Fear: {self.last_score:.2f}",
@@ -316,50 +436,125 @@ if "v" in qp and qp["v"]:
             video_processor_factory=VideoProcessor,
             rtc_configuration=rtc_config,
             media_stream_constraints={"video": True, "audio": False},
+            async_processing=True,
         )
-
 
         st.session_state[f"webrtc_ctx_{vid}"] = ctx
 
-
-        chart_placeholder = st.empty()
-        status_placeholder = st.empty()
         chart_key = f"fear_chart_{vid}"
         if chart_key not in st.session_state:
             st.session_state[chart_key] = None
 
-        if ctx and ctx.state.playing:
-            while ctx.state.playing:
-                try:
-                    _, raw, wavg = result_queue.get(timeout=1.0)
-                    if st.session_state[chart_key] is None:
-                        st.session_state[chart_key] = chart_placeholder.line_chart(
-                            {
-                                "fear": [raw],
-                                "weighted": [wavg],
-                            }
-                        )
-                    else:
-                        st.session_state[chart_key].add_rows(
-                            {
-                                "fear": [raw],
-                                "weighted": [wavg],
-                            }
-                        )
-                    status_placeholder.caption(
-                        f"Latest Fear: {raw:.2f} • Weighted Avg: {wavg:.2f}"
+        wavg_key = f"wavg_series_{vid}"
+        if wavg_key not in st.session_state:
+            st.session_state[wavg_key] = []
+
+        if ctx is not None:
+            try:
+                st.caption(f"WebRTC playing: {ctx.state.playing}")
+                csv_timestamp, latest_fear, latest_wavg = read_latest_fear_data(vid)
+                if csv_timestamp:
+                    st.caption(
+                        f"CSV data: Fear={latest_fear:.2f}, WAvg={latest_wavg:.2f}"
                     )
+                    csv_path = get_csv_path(vid)
+                    if os.path.exists(csv_path):
+                        file_size = os.path.getsize(csv_path)
+                        st.caption(f"CSV file: {csv_path} ({file_size} bytes)")
+                else:
+                    st.caption("No CSV data yet")
+            except Exception:
+                pass
 
-                except queue.Empty:
-                    pass
-                time.sleep(0.05)
+        print_debug("Checking for CSV data...")
 
-    if st.button("← Back to Search"):
-        # Stop WebRTC first to avoid session_state KeyError during rerun
-        existing_ctx = st.session_state.get(f"webrtc_ctx_{vid}")
-        stop_webrtc_and_go_back(vid, existing_ctx)
+        csv_timestamp, latest_fear, latest_wavg = read_latest_fear_data(vid)
+        print_debug(
+            f"CSV read result: timestamp={csv_timestamp}, fear={latest_fear}, wavg={latest_wavg}"
+        )
 
-# Search page
+        if csv_timestamp:
+
+            last_known_time = st.session_state.get(f"last_csv_time_{vid}", 0)
+            print_debug(
+                f"Comparing timestamps: new={csv_timestamp}, last={last_known_time}"
+            )
+
+            if csv_timestamp > last_known_time:
+                print_debug("New data detected! Updating chart...")
+                status_placeholder.caption(
+                    f"Latest Fear: {latest_fear:.2f} • Weighted Avg: {latest_wavg:.2f}"
+                )
+
+                st.session_state[f"last_csv_time_{vid}"] = csv_timestamp
+
+                time.sleep(0.1)
+                st.rerun()
+            else:
+                print_debug("No new data, skipping update")
+                status_placeholder.caption(
+                    f"Latest Fear: {latest_fear:.2f} • Weighted Avg: {latest_wavg:.2f}"
+                )
+        else:
+            print_debug("No CSV data found")
+
+        if "last_refresh" not in st.session_state:
+            st.session_state.last_refresh = time.time()
+
+        current_time = time.time()
+        if current_time - st.session_state.last_refresh > 2.0:
+            st.session_state.last_refresh = current_time
+            print_debug("Auto-refreshing to check for new data...")
+            st.rerun()
+
+        series = read_all_fear_data(vid)
+        print_debug(f"Chart data points: {len(series)}")
+        if len(series) > 0:
+            times = [point["t"] for point in series]
+            values = [point["weighted"] for point in series]
+
+            fig = go.Figure()
+            fig.add_trace(
+                go.Scatter(
+                    x=times,
+                    y=values,
+                    mode="lines+markers",
+                    name="Weighted Fear",
+                    line=dict(color="#ff6b6b", width=3),
+                    marker=dict(size=4),
+                )
+            )
+
+            fig.update_layout(
+                title="Live Weighted Fear Score",
+                xaxis_title="Time",
+                yaxis_title="Weighted Fear (0-10)",
+                yaxis=dict(range=[0, 10]),
+                height=400,
+                showlegend=False,
+                margin=dict(l=50, r=50, t=50, b=50),
+            )
+
+            plotly_placeholder.plotly_chart(fig, use_container_width=True)
+        else:
+
+            fig = go.Figure()
+            fig.update_layout(
+                title="Live Weighted Fear Score - Waiting for data...",
+                xaxis_title="Time",
+                yaxis_title="Weighted Fear (0-10)",
+                yaxis=dict(range=[0, 10]),
+                height=400,
+                showlegend=False,
+                margin=dict(l=50, r=50, t=50, b=50),
+            )
+            plotly_placeholder.plotly_chart(fig, use_container_width=True)
+
+        if st.button("← Back to Search"):
+
+            existing_ctx = st.session_state.get(f"webrtc_ctx_{vid}")
+            stop_webrtc_and_go_back(vid, existing_ctx)
+
 else:
 
     center = st.columns([1, 6, 1])[1]
