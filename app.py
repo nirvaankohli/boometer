@@ -2,7 +2,6 @@
 from typing import List, Dict, Optional
 from urllib.parse import parse_qs, urlparse
 import math
-from xml.parsers.expat import model
 import streamlit as st
 from youtubesearchpython import VideosSearch
 import cv2
@@ -14,6 +13,9 @@ from classification.pretrained.api.inference.emotion.classification import Infer
 from classification.pretrained.api.fear.scores.calculate import from_emotion_scores
 from classification.preprocessing.image.cropping.face.transform import crop_face
 from pathlib import Path
+from collections import deque
+import time
+import queue
 
 
 MODEL_PATH = (
@@ -51,6 +53,29 @@ model = Infer()
 print_debug("Model initialized.")
 
 
+def stop_webrtc_and_go_back(vid: str, ctx):
+
+    # Attempt to stop the webrtc streamer cleanly before navigation
+    try:
+        if ctx is not None and hasattr(ctx, "stop"):
+            ctx.stop()
+            time.sleep(0.1)  # give it a brief moment to tear down
+    except Exception as e:
+        print_debug("Error stopping WebRTC:", str(e))
+
+    # Clear any chart instance for this video
+    chart_key = f"fear_chart_{vid}"
+    if chart_key in st.session_state:
+        st.session_state[chart_key] = None
+
+    # Remove the video query param and rerun
+    try:
+        del st.query_params["v"]
+    except KeyError:
+        pass
+    st.rerun()
+
+
 def get_youtube_id(url: str) -> Optional[str]:
 
     if not url:
@@ -66,7 +91,6 @@ def get_youtube_id(url: str) -> Optional[str]:
 
 
 def extract_needed_data(results: List[Dict], idx: int) -> list:
-
     if idx < 0 or idx >= len(results):
         return []
 
@@ -90,6 +114,7 @@ def youtube_results(query: str, limit: int) -> tuple[List[Dict], Optional[str]]:
             return [], "No results found. Try a different search term."
         return results, None
     except Exception as e:
+
         st.error(f"Search failed: {str(e)}")
         return [], "Search failed. Please try again in a moment."
 
@@ -166,122 +191,173 @@ if "v" in qp and qp["v"]:
 
     with col2:
 
+        # run streamlit cache clear
+        result_queue = queue.Queue(maxsize=1)
+
         class VideoProcessor(VideoTransformerBase):
+
             def __init__(self):
+
                 self.face_detector = crop_face(MODEL_PATH, debug=debug)
                 self.last_score = 0.0
+                self.weighted_score = 0.0
                 self.frame_count = 0
                 self.process_this_frame = True
+                self.scores = deque(maxlen=180)
+                self.timestamps = deque(maxlen=180)
+                self.result_queue = result_queue
 
-            def transform(self, frame):
+            @staticmethod
+            def weighted_average(scores) -> float:
+                if not scores:
+                    return 0.0
+                arr = np.asarray(scores, dtype=float)
+                arr = np.clip(arr, 0.0, 10.0)
+                weights = np.maximum(arr, 1e-6)  # higher scores get higher weights
+                return float(np.sum(arr * weights) / np.sum(weights))
+
+            def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
                 self.frame_count += 1
                 img = frame.to_ndarray(format="bgr24")
 
                 # Process every 3rd frame for performance
                 if self.frame_count % 3 == 0:
                     try:
-                        # Detect faces first
                         faces = self.face_detector.detect_faces(img)
-
                         if len(faces) > 0:
-                            # Draw face rectangle
                             for x, y, w, h in faces:
                                 cv2.rectangle(
                                     img, (x, y), (x + w, y + h), (0, 255, 0), 2
                                 )
 
-                            # Get the cropped face
                             img_proc = self.face_detector.crop_first_face(img)
+                            if (
+                                img_proc is not None
+                                and img_proc.size > 0
+                                and len(img_proc.shape) == 3
+                            ):
+                                img_proc_rgb = cv2.cvtColor(img_proc, cv2.COLOR_BGR2RGB)
+                                img_proc_pil = Image.fromarray(img_proc_rgb)
 
-                            if img_proc is not None and img_proc.size > 0:
-                                # Ensure proper size and channels
-                                if (
-                                    len(img_proc.shape) == 3
-                                ):  # Check if it's a valid color image
-                                    # Convert to RGB for the model
-                                    img_proc_rgb = cv2.cvtColor(
-                                        img_proc, cv2.COLOR_BGR2RGB
-                                    )
-                                    img_proc_pil = Image.fromarray(img_proc_rgb)
+                                model.set_image(img_proc_pil)
+                                results = model.predict()
+                                print_debug("Raw prediction results:", results)
 
-                                    # Get emotion predictions
-                                    model.set_image(img_proc_pil)
-                                    results = model.predict()
-                                    print_debug("Raw prediction results:", results)
+                                if results and isinstance(results, list):
+                                    scores = model.get_numeric_scores(results)
+                                    print_debug("Numeric scores:", scores)
 
-                                    if (
-                                        results
-                                        and isinstance(results, list)
-                                        and len(results) > 0
+                                    if scores and all(
+                                        isinstance(v, (int, float))
+                                        for v in scores.values()
                                     ):
-                                        scores = model.get_numeric_scores(results)
-                                        print_debug("Numeric scores:", scores)
-
-                                        # Validate scores before calculating fear
-                                        if (
-                                            scores
-                                            and len(scores) > 0
-                                            and all(
-                                                isinstance(v, (int, float))
-                                                for v in scores.values()
-                                            )
+                                        new_score = from_emotion_scores(
+                                            emotion_scores=scores, debug=True
+                                        ).calculate_fear_score()
+                                        if new_score is not None and not np.isnan(
+                                            new_score
                                         ):
-                                            fear_calculator = from_emotion_scores(
-                                                emotion_scores=scores, debug=True
+                                            # Update raw and weighted scores
+                                            self.last_score = new_score
+                                            now = time.time()
+                                            self.timestamps.append(now)
+                                            self.scores.append(new_score)
+                                            self.weighted_score = self.weighted_average(
+                                                list(self.scores)
                                             )
-                                            new_score = (
-                                                fear_calculator.calculate_fear_score()
-                                            )
-
-                                            if new_score is not None and not np.isnan(
-                                                new_score
-                                            ):
-                                                self.last_score = new_score
-                                                print_debug(
-                                                    f"Updated fear score to: {self.last_score}"
+                                            # Stream to UI
+                                            try:
+                                                self.result_queue.put_nowait(
+                                                    (
+                                                        now,
+                                                        self.last_score,
+                                                        self.weighted_score,
+                                                    )
                                                 )
-
+                                            except queue.Full:
+                                                pass
+                                            print_debug(
+                                                f"Updated fear score to: {self.last_score} (weighted: {self.weighted_score:.2f})"
+                                            )
                     except Exception as e:
-                        print_debug(f"Frame processing error: {str(e)}")
                         import traceback
 
+                        print_debug(f"Frame processing error: {str(e)}")
                         print_debug("Traceback:", traceback.format_exc())
 
-                # Always draw the score
+                # Overlay both instantaneous and weighted scores
                 cv2.putText(
                     img,
-                    f"Fear Score: {self.last_score:.2f}",
+                    f"Fear: {self.last_score:.2f}",
                     (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     1,
                     (0, 0, 255),
                     2,
                 )
+                cv2.putText(
+                    img,
+                    f"WAvg: {self.weighted_score:.2f}",
+                    (10, 65),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    1,
+                    (255, 0, 0),
+                    2,
+                )
 
-                return img
+                return av.VideoFrame.from_ndarray(img, format="bgr24")
 
         rtc_config = RTCConfiguration(
             {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
         )
 
-        webrtc_streamer(
+        ctx = webrtc_streamer(
             key=f"reaction_{vid}",
             video_processor_factory=VideoProcessor,
             rtc_configuration=rtc_config,
             media_stream_constraints={"video": True, "audio": False},
         )
 
+
+        st.session_state[f"webrtc_ctx_{vid}"] = ctx
+
+
+        chart_placeholder = st.empty()
+        status_placeholder = st.empty()
+        chart_key = f"fear_chart_{vid}"
+        if chart_key not in st.session_state:
+            st.session_state[chart_key] = None
+
+        if ctx and ctx.state.playing:
+            while ctx.state.playing:
+                try:
+                    _, raw, wavg = result_queue.get(timeout=1.0)
+                    if st.session_state[chart_key] is None:
+                        st.session_state[chart_key] = chart_placeholder.line_chart(
+                            {
+                                "fear": [raw],
+                                "weighted": [wavg],
+                            }
+                        )
+                    else:
+                        st.session_state[chart_key].add_rows(
+                            {
+                                "fear": [raw],
+                                "weighted": [wavg],
+                            }
+                        )
+                    status_placeholder.caption(
+                        f"Latest Fear: {raw:.2f} • Weighted Avg: {wavg:.2f}"
+                    )
+
+                except queue.Empty:
+                    pass
+                time.sleep(0.05)
+
     if st.button("← Back to Search"):
-
-        try:
-
-            del st.query_params["v"]
-
-        except KeyError:
-
-            pass
-
-        st.rerun()
+        # Stop WebRTC first to avoid session_state KeyError during rerun
+        existing_ctx = st.session_state.get(f"webrtc_ctx_{vid}")
+        stop_webrtc_and_go_back(vid, existing_ctx)
 
 # Search page
 else:
